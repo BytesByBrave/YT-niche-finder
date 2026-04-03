@@ -1,53 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type Market = "US" | "UK";
-type Category =
-  | "All"
-  | "Tech"
-  | "Gaming"
-  | "Finance"
-  | "Health"
-  | "Education"
-  | "Entertainment"
-  | "Sports"
-  | "News"
-  | "DIY"
-  | "Music";
+import type { Market, Category, TrendItem, SortKey } from '../types';
+import { CATEGORIES } from '../types';
+import { buildRealTrends } from '../services/youtubeApi';
 
-type TrendItem = {
-  id: string;
-  market: Market;
-  topic: string;
-  keywords: string[];
-  category: Category;
-  velocity: number;
-  volume: number;
-  videosLast24h: number;
-  avgViews: number;
-  topChannelSubs: number;
-  channelsUnder50k: number;
-  channelsUnder10k: number;
-  competition: number;
-  saturation: number;
-  momentum: number[];
-  sentiment: number;
-  thumbnailStyle: "face" | "text-heavy" | "mystery" | "clean";
-  language: string;
-  opportunityScore: number;
-  predictedPeakInH: number;
-  contentGaps: string[];
-  related: string[];
-  lastUpdated: number;
-  videoId: string;
-  channelTitle: string;
-  publishedAt: string;
-  viewCount: number;
-  likeCount: number;
-};
 
-type SortKey = "opportunity" | "velocity" | "volume" | "lowcomp";
-
-const CATEGORIES: Category[] = ["All","Tech","Gaming","Finance","Health","Education","Entertainment","Sports","News","DIY","Music"];
 
 const YT_API_KEY = "AIzaSyCHTFZFt7eOIfXU6oVTtsOZpVBsb0kkLlQ";
 

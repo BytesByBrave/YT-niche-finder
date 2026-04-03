@@ -1,4 +1,4 @@
-import type { Market, TrendItem } from '../types';
+import type { Market, TrendItem, Category, NicheItem, AISafety } from "../types";
 
 const YT_API_KEY = import.meta.env.VITE_YOUTUBE_API_KEY;
 
@@ -50,9 +50,9 @@ export async function fetchChannelStats(channelIds: string[]) {
   }
 }
 
-export function categorizeVideo(title: string, description: string, tags: string[] = []): import('../types').Category {
+// --- Data processing functions ---
+export function categorizeVideo(title: string, description: string, tags: string[] = []): Category {
   const text = `${title} ${description} ${tags.join(" ")}`.toLowerCase();
-
   if (/game|gaming|minecraft|fortnite|valorant|gta|playstation|xbox|nintendo|stream/i.test(text)) return "Gaming";
   if (/tech|iphone|android|apple|samsung|ai|chatgpt|tesla|review|unbox|phone|laptop/i.test(text)) return "Tech";
   if (/money|finance|stock|invest|crypto|bitcoin|trading|side hustle|make money/i.test(text)) return "Finance";
@@ -84,8 +84,6 @@ export function calculateVelocity(viewCount: number, likeCount: number, publishe
   const hoursAgo = (Date.now() - new Date(publishedAt).getTime()) / (1000 * 60 * 60);
   const viewsPerHour = viewCount / Math.max(1, hoursAgo);
   const engagement = likeCount / Math.max(1, viewCount);
-
-  // Normalize to 0-100
   const velocityBase = Math.log10(viewsPerHour + 1) * 20;
   const engagementBoost = engagement * 30;
   return Math.min(99, Math.max(40, Math.round(velocityBase + engagementBoost)));
@@ -117,7 +115,6 @@ export async function buildRealTrends(apiQuery = ""): Promise<TrendItem[]> {
     ...ukVideos.map((v: any) => ({ ...v, market: "UK" as Market }))
   ];
 
-  // Get unique channel IDs
   const channelIds = [...new Set(allVideos.map((v: any) => v.snippet.channelId))] as string[];
   const channelStats = await fetchChannelStats(channelIds);
 
@@ -136,7 +133,6 @@ export async function buildRealTrends(apiQuery = ""): Promise<TrendItem[]> {
     const keywords = extractKeywords(snippet.title, snippet.tags);
     const thumbnailStyle = detectThumbnailStyle(snippet.title);
 
-    // Estimate competition and saturation from real data
     const engagementRate = viewCount > 0 ? (likeCount + commentCount) / viewCount : 0;
     const isRecent = (Date.now() - new Date(snippet.publishedAt).getTime()) < 24 * 60 * 60 * 1000;
 
@@ -151,7 +147,6 @@ export async function buildRealTrends(apiQuery = ""): Promise<TrendItem[]> {
     const channelsUnder10k = channelSubs < 10000 ? 1 : 0;
     const channelsUnder50k = channelSubs < 50000 ? 1 : 0;
     const volume = Math.round(viewCount / Math.max(1, (Date.now() - new Date(snippet.publishedAt).getTime()) / (1000 * 60 * 60)));
-
     const oppScore = Math.max(0, Math.min(100, opportunity(velocity, competition, channelsUnder10k, viewCount)));
     const predictedPeak = isRecent ? Math.floor(velocity / 10) + 2 : Math.floor(velocity / 5) + 12;
 
@@ -193,7 +188,6 @@ export async function buildRealTrends(apiQuery = ""): Promise<TrendItem[]> {
     };
   });
 
-  // Sort by opportunity score and deduplicate similar topics
   const seen = new Set<string>();
   const unique = trends.filter(t => {
     const key = t.topic.toLowerCase().replace(/[^\w]/g, "").slice(0, 20);
@@ -203,4 +197,109 @@ export async function buildRealTrends(apiQuery = ""): Promise<TrendItem[]> {
   });
 
   return unique.sort((a, b) => b.opportunityScore - a.opportunityScore);
+}
+
+// --- RPM benchmarks per category (USD, industry standard estimates) ---
+const RPM_BENCHMARKS: Record<string, number> = {
+  Finance: 15,
+  Tech: 10,
+  Health: 8,
+  Education: 7,
+  DIY: 6,
+  Sports: 5,
+  Gaming: 4,
+  Entertainment: 3,
+  Music: 2,
+  News: 3,
+};
+
+// --- AI safety ratings per category ---
+const AI_SAFETY: Record<string, { rating: AISafety; reason: string }> = {
+  Gaming:        { rating: "safe",     reason: "Gameplay commentary & reviews — very AI-automation friendly, low ban risk." },
+  DIY:           { rating: "safe",     reason: "Tutorial & how-to content — AI voiceover + B-roll works well, low risk." },
+  Education:     { rating: "safe",     reason: "Explainer & tutorial format — perfect for AI-generated narration." },
+  Entertainment: { rating: "safe",     reason: "General entertainment — broad and forgiving, good for AI channels." },
+  Tech:          { rating: "risky",    reason: "Product claims & specs — risk of misinformation flags if AI makes errors." },
+  Health:        { rating: "risky",    reason: "Medical content — YouTube's YMYL policies; AI content needs human review." },
+  Finance:       { rating: "risky",    reason: "Financial advice regulations — disclaimer required, human oversight needed." },
+  Sports:        { rating: "risky",    reason: "Broadcast rights issues — clips may trigger copyright. Commentary is safer." },
+  News:          { rating: "ban-risk", reason: "Misinformation policy — AI-generated news is high-risk for strikes & bans." },
+  Music:         { rating: "ban-risk", reason: "Copyright — cover/reaction content gets Content ID'd; original only is safe." },
+};
+
+/** Build niche-level aggregated data from real YouTube video data */
+export async function buildNiches(market: "US" | "UK" | "Both" = "Both", apiQuery = ""): Promise<NicheItem[]> {
+  const trends = await buildRealTrends(apiQuery);
+
+  // Filter by market if needed
+  const filtered = market === "Both" ? trends : trends.filter(t => t.market === market);
+
+  // Group by category
+  const groups: Record<string, TrendItem[]> = {};
+  for (const item of filtered) {
+    const cat = item.category === "All" ? "Entertainment" : item.category;
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push(item);
+  }
+
+  const niches: NicheItem[] = Object.entries(groups).map(([cat, videos]) => {
+    const rpm = RPM_BENCHMARKS[cat] ?? 3;
+    const safety = AI_SAFETY[cat] ?? { rating: "risky" as AISafety, reason: "Unknown category — review manually." };
+
+    // Aggregate metrics
+    const totalVPH = videos.reduce((s, v) => s + v.volume, 0);
+    const totalViews = videos.reduce((s, v) => s + v.viewCount, 0);
+    const avgComp = Math.round(videos.reduce((s, v) => s + v.competition, 0) / videos.length);
+    const avgOpp = Math.round(videos.reduce((s, v) => s + v.opportunityScore, 0) / videos.length);
+    const avgSubs = Math.round(videos.reduce((s, v) => s + v.topChannelSubs, 0) / videos.length);
+    const smallWins = videos.filter(v => v.channelsUnder10k > 0).length;
+
+    // Market cap: estimated monthly views * rpm / 1000
+    // totalViews from ~24h of trending, scale to 30 days, weighted conservatively
+    const estimatedMonthlyViews = totalViews * 20; // ~20x daily sample = conservative monthly
+    const marketCap = Math.round((estimatedMonthlyViews * rpm) / 1000);
+
+    // Build VPH trend sparkline (simulate 12 recent points from video data)
+    const vphTrend = Array.from({ length: 12 }, (_, i) => {
+      const subset = videos.slice(0, Math.max(1, Math.floor(videos.length * (i + 1) / 12)));
+      const vph = subset.reduce((s, v) => s + v.volume, 0);
+      return Math.max(1, Math.round(vph / Math.max(1, i + 1)));
+    });
+
+    // Top keywords across niche
+    const kwMap: Record<string, number> = {};
+    videos.forEach(v => v.keywords.forEach(k => { kwMap[k] = (kwMap[k] || 0) + 1; }));
+    const topKeywords = Object.entries(kwMap).sort((a, b) => b[1] - a[1]).slice(0, 6).map(e => e[0]);
+
+    // Top video
+    const topVideo = videos.sort((a, b) => b.viewCount - a.viewCount)[0];
+
+    return {
+      id: `niche-${cat}-${market}`,
+      niche: cat as Category,
+      market,
+      rpm,
+      vph: totalVPH,
+      marketCap,
+      competitorCount: videos.length,
+      avgCompetitorSubs: avgSubs,
+      competition: avgComp,
+      opportunityScore: avgOpp,
+      aiSafety: safety.rating,
+      aiSafetyReason: safety.reason,
+      topKeywords,
+      vphTrend,
+      topVideo: topVideo ? {
+        title: topVideo.topic,
+        videoId: topVideo.videoId,
+        viewCount: topVideo.viewCount,
+        channelTitle: topVideo.channelTitle,
+      } : null,
+      totalViews,
+      smallChannelWins: smallWins,
+      lastUpdated: Date.now(),
+    };
+  });
+
+  return niches.sort((a, b) => b.opportunityScore - a.opportunityScore);
 }

@@ -1,6 +1,6 @@
 import { memo } from "react";
 import type { Market, Category, SortKey } from "@/types";
-import { Pill } from "./ui";
+
 
 interface FilterBarProps {
 market: Market | "Both";

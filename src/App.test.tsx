@@ -3,5 +3,5 @@ import App from './App'
 
 test('renders the app', () => {
   render(<App />)
-  expect(screen.getByText(/YouTube Trends Intelligence/i)).toBeInTheDocument()
+  expect(screen.getByText(/Niche Intelligence/i)).toBeInTheDocument()
 })

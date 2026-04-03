@@ -11,7 +11,14 @@ export type Category =
   | "Sports"
   | "News"
   | "DIY"
-  | "Music";
+  | "Music"
+  | "Celebrity"
+  | "Rewinds"
+  | "Royal"
+  | "Food"
+  | "TrueCrime"
+  | "Travel"
+  | "History";
 
 export type AISafety = "safe" | "risky" | "ban-risk";
 
@@ -51,39 +58,73 @@ export type NicheItem = {
   id: string;
   niche: Category;
   market: Market | "Both";
-  /** Estimated RPM in USD based on category benchmarks */
   rpm: number;
-  /** Views Per Hour aggregated across all videos in this niche */
   vph: number;
-  /** Estimated monthly market cap in USD (totalMonthlyViews × rpm / 1000) */
   marketCap: number;
-  /** Number of competitor channels found */
   competitorCount: number;
-  /** Average subscriber count among competitors */
   avgCompetitorSubs: number;
-  /** Overall competition score 0–100 (lower = easier to enter) */
   competition: number;
-  /** Opportunity score 0–100 (higher = better) */
   opportunityScore: number;
-  /** AI-content safety rating */
   aiSafety: AISafety;
-  /** Human-readable reason for safety rating */
   aiSafetyReason: string;
-  /** Top keywords / topics to target in this niche */
   topKeywords: string[];
-  /** VPH trend for sparkline (last 12 data points) */
   vphTrend: number[];
-  /** Top performing video in this niche */
   topVideo: {
     title: string;
     videoId: string;
     viewCount: number;
     channelTitle: string;
   } | null;
-  /** Total raw view count across all niche videos */
   totalViews: number;
-  /** Count of small channels (<10k subs) winning in this niche */
   smallChannelWins: number;
+  lastUpdated: number;
+};
+
+/** A single YouTube channel found for a niche */
+export type ChannelResult = {
+  id: string;
+  title: string;
+  description: string;
+  thumbnail: string;
+  subscriberCount: number;
+  videoCount: number;
+  viewCount: number;
+  customUrl: string;
+  publishedAt: string;
+  /** Estimated monthly revenue based on niche RPM */
+  estMonthlyRevenue: number;
+  /** Channel size tier */
+  tier: "mega" | "large" | "mid" | "small" | "micro";
+};
+
+/** A pre-defined curated niche with known market and real YouTube data */
+export type CuratedNiche = {
+  id: string;
+  name: string;
+  emoji: string;
+  color: string;
+  market: Market;
+  category: Category;
+  searchQuery: string;
+  rpm: number;
+  aiSafety: AISafety;
+  aiSafetyReason: string;
+  automationTips: string[];
+  tags: string[];
+  // Live data filled in after API fetch
+  vph: number;
+  marketCap: number;
+  competition: number;
+  opportunityScore: number;
+  vphTrend: number[];
+  topKeywords: string[];
+  topVideo: {
+    title: string;
+    videoId: string;
+    viewCount: number;
+    channelTitle: string;
+  } | null;
+  channels: ChannelResult[];
   lastUpdated: number;
 };
 
@@ -92,4 +133,5 @@ export type SortKey = "opportunity" | "vph" | "rpm" | "marketcap" | "lowcomp";
 export const CATEGORIES: Category[] = [
   "All", "Tech", "Gaming", "Finance", "Health",
   "Education", "Entertainment", "Sports", "News", "DIY", "Music",
+  "Celebrity", "Rewinds", "Royal", "Food", "TrueCrime", "Travel", "History",
 ];

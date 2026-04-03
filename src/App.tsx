@@ -1,9 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { NicheItem, AISafety, SortKey } from "../types";
-import { buildNiches } from "../services/youtubeApi";
+import { useEffect, useRef, useState } from "react";
+import type { CuratedNiche, ChannelResult, AISafety } from "../types";
+import { buildCuratedNiches } from "../services/youtubeApi";
 
-// ─── Formatters ───────────────────────────────────────────────────────────────
-function fmt(n: number) {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function fmtSubs(n: number) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return `${n}`;
+}
+function fmtMoney(n: number) {
   if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
@@ -15,226 +20,247 @@ function fmtNum(n: number) {
   return `${n}`;
 }
 
-// ─── AI Safety Badge ──────────────────────────────────────────────────────────
-function SafetyBadge({ rating }: { rating: AISafety }) {
-  const cfgMap: Record<AISafety, { label: string; cls: string }> = {
-    safe:        { label: "✅ AI Safe",  cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
-    risky:       { label: "⚠️ Risky",   cls: "bg-amber-50 text-amber-700 ring-amber-200" },
-    "ban-risk":  { label: "❌ Ban Risk",cls: "bg-rose-50 text-rose-700 ring-rose-200" },
-  };
-  const cfg = cfgMap[rating];
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset whitespace-nowrap ${cfg.cls}`}>
-      {cfg.label}
-    </span>
-  );
-}
-
-// ─── Opportunity Score Badge ──────────────────────────────────────────────────
-function OppBadge({ score }: { score: number }) {
-  const cls = score >= 70
-    ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
-    : score >= 50
-    ? "bg-blue-50 text-blue-700 ring-blue-200"
-    : "bg-zinc-100 text-zinc-600 ring-zinc-200";
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-bold ring-1 ring-inset ${cls}`}>
-      <span className="h-1.5 w-1.5 rounded-full bg-current" />
-      {score}
-    </span>
-  );
-}
-
-// ─── Mini Bar ─────────────────────────────────────────────────────────────────
-function MiniBar({ value, max, color = "#18181b" }: { value: number; max: number; color?: string }) {
-  const pct = Math.max(2, Math.min(100, (value / Math.max(1, max)) * 100));
-  return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-100">
-      <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
-    </div>
-  );
-}
-
 // ─── Sparkline ────────────────────────────────────────────────────────────────
-function Sparkline({ data, color = "#18181b" }: { data: number[]; color?: string }) {
-  const w = 80, h = 24, pad = 2;
+function Sparkline({ data, color }: { data: number[]; color: string }) {
   if (!data?.length) return null;
+  const w = 100, h = 28, pad = 2;
   const max = Math.max(...data), min = Math.min(...data);
   const norm = (v: number) => h - pad - ((v - min) / Math.max(1, max - min)) * (h - pad * 2);
   const step = (w - pad * 2) / (data.length - 1);
   const d = data.map((v, i) => `${i === 0 ? "M" : "L"} ${pad + i * step} ${norm(v)}`).join(" ");
+  const area = d + ` L ${pad + (data.length - 1) * step} ${h} L ${pad} ${h} Z`;
   return (
     <svg width={w} height={h} className="overflow-visible">
+      <defs>
+        <linearGradient id={`sg-${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#sg-${color.replace("#","")})`} />
       <path d={d} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" />
     </svg>
   );
 }
 
-// ─── Category Emoji Map ───────────────────────────────────────────────────────
-const NICHE_EMOJI: Record<string, string> = {
-  Gaming: "🎮", Finance: "💰", Tech: "💻", Health: "🏃", Education: "📚",
-  Entertainment: "🎬", Sports: "⚽", News: "📰", DIY: "🔨", Music: "🎵", All: "🌐",
-};
-const NICHE_COLOR: Record<string, string> = {
-  Gaming: "#6366f1", Finance: "#10b981", Tech: "#3b82f6", Health: "#f43f5e",
-  Education: "#f59e0b", Entertainment: "#8b5cf6", Sports: "#f97316",
-  News: "#6b7280", DIY: "#84cc16", Music: "#ec4899", All: "#71717a",
-};
+// ─── Safety Badge ─────────────────────────────────────────────────────────────
+function SafetyBadge({ rating, small = false }: { rating: AISafety; small?: boolean }) {
+  const cfgMap: Record<AISafety, { label: string; cls: string }> = {
+    safe:       { label: "✅ AI Safe",  cls: "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30" },
+    risky:      { label: "⚠️ Risky",   cls: "bg-amber-500/15 text-amber-400 ring-amber-500/30" },
+    "ban-risk": { label: "❌ Ban Risk", cls: "bg-red-500/15 text-red-400 ring-red-500/30" },
+  };
+  const cfg = cfgMap[rating];
+  return (
+    <span className={`inline-flex items-center rounded-full ring-1 ring-inset font-semibold whitespace-nowrap ${
+      small ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-[11px]"
+    } ${cfg.cls}`}>
+      {cfg.label}
+    </span>
+  );
+}
 
-// ─── Niche Row ────────────────────────────────────────────────────────────────
-function NicheRow({
-  item, active, maxVph, onClick,
-}: {
-  item: NicheItem; active: boolean; maxVph: number; onClick: () => void;
-}) {
-  const color = NICHE_COLOR[item.niche] || "#71717a";
+// ─── Tier Badge ───────────────────────────────────────────────────────────────
+function TierBadge({ tier }: { tier: ChannelResult["tier"] }) {
+  const cfg: Record<ChannelResult["tier"], { label: string; cls: string }> = {
+    mega:  { label: "🥇 Top",      cls: "bg-yellow-500/15 text-yellow-400 ring-yellow-500/30" },
+    large: { label: "📈 Large",    cls: "bg-blue-500/15 text-blue-400 ring-blue-500/30" },
+    mid:   { label: "🚀 Growing",  cls: "bg-violet-500/15 text-violet-400 ring-violet-500/30" },
+    small: { label: "🌱 Small",    cls: "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30" },
+    micro: { label: "🔬 Micro",    cls: "bg-zinc-500/15 text-zinc-400 ring-zinc-500/30" },
+  };
+  const c = cfg[tier];
+  return (
+    <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${c.cls}`}>
+      {c.label}
+    </span>
+  );
+}
+
+
+// ─── Channel Card ─────────────────────────────────────────────────────────────
+function ChannelCard({ ch }: { ch: ChannelResult }) {
+  const handle = ch.customUrl ? `@${ch.customUrl.replace(/^@/, "")}` : ch.title;
+  return (
+    <a
+      href={`https://youtube.com/${ch.customUrl ? ch.customUrl : `channel/${ch.id}`}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex items-start gap-3 rounded-xl border border-white/5 bg-white/5 p-3 hover:bg-white/8 hover:border-white/10 transition-all group"
+    >
+      {/* Avatar */}
+      <div className="relative shrink-0">
+        {ch.thumbnail ? (
+          <img src={ch.thumbnail} alt={ch.title} className="h-10 w-10 rounded-full object-cover ring-2 ring-white/10" />
+        ) : (
+          <div className="h-10 w-10 rounded-full bg-white/10 flex items-center justify-center text-lg">
+            📺
+          </div>
+        )}
+      </div>
+      {/* Info */}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="truncate text-[13px] font-semibold text-white group-hover:text-white/90">{ch.title}</span>
+          <TierBadge tier={ch.tier} />
+        </div>
+        <div className="mt-0.5 text-[11px] text-white/40 truncate">{handle}</div>
+        <div className="mt-1.5 flex items-center gap-3">
+          <span className="text-[12px] font-bold text-white/80">{fmtSubs(ch.subscriberCount)}<span className="ml-0.5 text-[10px] font-normal text-white/40">subs</span></span>
+          <span className="text-[12px] text-white/50">{fmtNum(ch.videoCount)}<span className="ml-0.5 text-[10px] text-white/30">videos</span></span>
+          {ch.estMonthlyRevenue > 0 && (
+            <span className="text-[12px] font-semibold text-emerald-400">
+              ~{fmtMoney(ch.estMonthlyRevenue)}<span className="text-[10px] font-normal text-emerald-400/60">/mo</span>
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="shrink-0 mt-1 text-white/20 group-hover:text-white/50 transition">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M7 17L17 7M17 7H7M17 7v10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+      </div>
+    </a>
+  );
+}
+
+// ─── Niche Sidebar Row ────────────────────────────────────────────────────────
+function NicheSidebarRow({ niche, active, onClick }: { niche: CuratedNiche; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className={`group flex w-full items-center gap-3 px-4 py-3.5 text-left transition-all border-b border-zinc-100 last:border-0 ${
-        active ? "bg-zinc-50 border-l-2" : "hover:bg-zinc-50/60"
+      className={`group w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left transition-all ${
+        active
+          ? "bg-white/10 border border-white/10"
+          : "hover:bg-white/5 border border-transparent"
       }`}
-      style={active ? { borderLeftColor: color } : {}}
+      style={active ? { borderLeftColor: niche.color, borderLeftWidth: "2px" } : {}}
     >
-      {/* Niche icon */}
-      <div
-        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg shadow-sm"
-        style={{ background: `${color}18`, border: `1.5px solid ${color}40` }}
-      >
-        {NICHE_EMOJI[item.niche] || "📌"}
-      </div>
-
-      {/* Name + safety */}
+      <span className="text-lg shrink-0">{niche.emoji}</span>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[14px] font-semibold">{item.niche}</span>
-          <SafetyBadge rating={item.aiSafety} />
+        <div className="truncate text-[13px] font-medium text-white/90">{niche.name}</div>
+        <div className="mt-0.5 flex items-center gap-1.5">
+          <SafetyBadge rating={niche.aiSafety} small />
+          <span className="text-[10px] text-white/40">${niche.rpm} RPM</span>
         </div>
         <div className="mt-1">
-          <MiniBar value={item.vph} max={maxVph} color={color} />
+          <div className="h-0.5 w-full overflow-hidden rounded-full bg-white/10">
+            <div className="h-full rounded-full transition-all" style={{ width: `${niche.opportunityScore}%`, background: niche.color }} />
+          </div>
         </div>
       </div>
-
-      {/* VPH */}
-      <div className="hidden w-[80px] shrink-0 flex-col items-end sm:flex">
-        <div className="text-[12px] text-zinc-400">VPH</div>
-        <div className="text-[14px] font-bold tabular-nums">{fmtNum(item.vph)}</div>
-      </div>
-
-      {/* RPM */}
-      <div className="hidden w-[60px] shrink-0 flex-col items-end md:flex">
-        <div className="text-[12px] text-zinc-400">RPM</div>
-        <div className="text-[14px] font-bold tabular-nums text-emerald-700">${item.rpm}</div>
-      </div>
-
-      {/* Market Cap */}
-      <div className="hidden w-[90px] shrink-0 flex-col items-end lg:flex">
-        <div className="text-[12px] text-zinc-400">Mkt Cap</div>
-        <div className="text-[13px] font-bold tabular-nums">{fmt(item.marketCap)}</div>
-      </div>
-
-      {/* Competition */}
-      <div className="hidden w-[80px] shrink-0 flex-col items-end xl:flex">
-        <div className="text-[12px] text-zinc-400">Competition</div>
-        <div className="text-[13px] font-semibold tabular-nums">{item.competition}/100</div>
-      </div>
-
-      {/* Opportunity */}
-      <div className="shrink-0">
-        <OppBadge score={item.opportunityScore} />
-      </div>
-
-      {/* Chevron */}
-      <div className="ml-1 hidden text-zinc-300 group-hover:text-zinc-500 xl:block">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-          <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-        </svg>
+      <div className="shrink-0 text-right">
+        <div className="text-[11px] font-bold tabular-nums" style={{ color: niche.color }}>{niche.opportunityScore}</div>
       </div>
     </button>
   );
 }
 
-// ─── Detail Panel ─────────────────────────────────────────────────────────────
-function NicheDetail({ item }: { item: NicheItem }) {
-  const color = NICHE_COLOR[item.niche] || "#71717a";
-  const safetyLabel = item.aiSafety === "safe"
-    ? { heading: "Great for AI Automation 🤖", bg: "bg-emerald-50", text: "text-emerald-800", border: "border-emerald-200" }
-    : item.aiSafety === "risky"
-    ? { heading: "Proceed with Caution ⚠️", bg: "bg-amber-50", text: "text-amber-800", border: "border-amber-200" }
-    : { heading: "High Ban Risk — Avoid ❌", bg: "bg-rose-50", text: "text-rose-800", border: "border-rose-200" };
+// ─── Niche Intelligence Panel ─────────────────────────────────────────────────
+function NicheIntelPanel({ niche }: { niche: CuratedNiche }) {
+  const safeCard = {
+    safe:       { bg: "bg-emerald-500/10", border: "border-emerald-500/20", text: "text-emerald-300", heading: "✅ Great for AI Automation" },
+    risky:      { bg: "bg-amber-500/10",   border: "border-amber-500/20",   text: "text-amber-300",   heading: "⚠️ Proceed with Caution" },
+    "ban-risk": { bg: "bg-red-500/10",     border: "border-red-500/20",     text: "text-red-300",     heading: "❌ High Ban Risk — Avoid AI" },
+  }[niche.aiSafety];
 
   return (
-    <div className="space-y-4 p-5">
-      {/* Header */}
-      <div className="flex items-start gap-3">
-        <div
-          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-2xl shadow-sm"
-          style={{ background: `${color}20`, border: `2px solid ${color}50` }}
-        >
-          {NICHE_EMOJI[item.niche] || "📌"}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-xl font-bold">{item.niche}</h2>
-            <SafetyBadge rating={item.aiSafety} />
+    <div className="space-y-4 p-4">
+      {/* Hero */}
+      <div className="rounded-2xl p-4 relative overflow-hidden" style={{ background: `linear-gradient(135deg, ${niche.color}22 0%, ${niche.color}08 100%)`, border: `1px solid ${niche.color}30` }}>
+        <div className="absolute top-0 right-0 text-6xl opacity-10 select-none pr-2 pt-1">{niche.emoji}</div>
+        <div className="relative">
+          <div className="flex items-start gap-3">
+            <div className="text-3xl">{niche.emoji}</div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xl font-bold text-white">{niche.name}</span>
+                <span className="text-[11px] font-medium px-2 py-0.5 rounded-full" style={{ background: `${niche.color}25`, color: niche.color, border: `1px solid ${niche.color}40` }}>
+                  {niche.market === "US" ? "🇺🇸 US" : "🇬🇧 UK"}
+                </span>
+                <SafetyBadge rating={niche.aiSafety} />
+              </div>
+              <div className="mt-1 text-[12px] text-white/50">
+                Opportunity score: <span className="font-bold" style={{ color: niche.color }}>{niche.opportunityScore}/100</span>
+                {" · "}Competition: <span className="font-medium text-white/70">{niche.competition}/100</span>
+              </div>
+            </div>
           </div>
-          <div className="mt-0.5 text-[12px] text-zinc-500">
-            {item.competitorCount} competitor videos tracked • {item.smallChannelWins} small channel wins (&lt;10k subs)
-          </div>
         </div>
-        <OppBadge score={item.opportunityScore} />
       </div>
 
-      {/* AI Safety Card */}
-      <div className={`rounded-xl border p-3 ${safetyLabel.bg} ${safetyLabel.border}`}>
-        <div className={`text-[13px] font-semibold ${safetyLabel.text}`}>{safetyLabel.heading}</div>
-        <div className={`mt-1 text-[12px] leading-relaxed ${safetyLabel.text} opacity-80`}>{item.aiSafetyReason}</div>
-      </div>
-
-      {/* Key Metrics Grid */}
+      {/* Metrics */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
-          { label: "Est. RPM", value: `$${item.rpm}`, sub: "per 1K views", accent: "#10b981" },
-          { label: "Views/Hour", value: fmtNum(item.vph), sub: "across niche", accent: "#3b82f6" },
-          { label: "Market Cap", value: fmt(item.marketCap), sub: "est. monthly rev", accent: "#8b5cf6" },
-          { label: "Avg Competitor", value: fmtNum(item.avgCompetitorSubs), sub: "subscribers", accent: "#f59e0b" },
+          { l: "Est. RPM", v: `$${niche.rpm}`, sub: "per 1K views", c: "#10b981" },
+          { l: "Views / Hr", v: fmtNum(niche.vph), sub: "live niche VPH", c: "#3b82f6" },
+          { l: "Market Cap", v: fmtMoney(niche.marketCap), sub: "est. monthly rev", c: niche.color },
+          { l: "Channels Found", v: `${niche.channels.length}`, sub: "in this niche", c: "#a855f7" },
         ].map(m => (
-          <div key={m.label} className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
-            <div className="text-[11px] text-zinc-500">{m.label}</div>
-            <div className="mt-0.5 text-[18px] font-bold tabular-nums" style={{ color: m.accent }}>{m.value}</div>
-            <div className="text-[10px] text-zinc-400">{m.sub}</div>
+          <div key={m.l} className="rounded-xl border border-white/5 bg-white/5 p-3">
+            <div className="text-[10px] text-white/40">{m.l}</div>
+            <div className="mt-0.5 text-[18px] font-bold tabular-nums" style={{ color: m.c }}>{m.v}</div>
+            <div className="text-[10px] text-white/30">{m.sub}</div>
           </div>
         ))}
       </div>
 
-      {/* VPH Sparkline + Competition */}
+      {/* VPH Trend + Competition */}
       <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-xl border border-zinc-200 p-3">
-          <div className="text-[12px] font-medium text-zinc-500 mb-2">VPH Trend</div>
-          <Sparkline data={item.vphTrend} color={color} />
-          <div className="mt-1 text-[11px] text-zinc-400">Views per hour (12 data points)</div>
+        <div className="rounded-xl border border-white/5 bg-white/5 p-3">
+          <div className="text-[11px] text-white/40 mb-2">VPH Trend</div>
+          <Sparkline data={niche.vphTrend} color={niche.color} />
+          <div className="mt-1 text-[10px] text-white/30">Views per hour over time</div>
         </div>
-        <div className="rounded-xl border border-zinc-200 p-3">
-          <div className="text-[12px] font-medium text-zinc-500 mb-2">Competition</div>
-          <div className="text-2xl font-bold tabular-nums">{item.competition}<span className="text-sm font-normal text-zinc-400">/100</span></div>
-          <div className="mt-2">
-            <MiniBar value={100 - item.competition} max={100}
-              color={item.competition < 40 ? "#10b981" : item.competition < 65 ? "#f59e0b" : "#f43f5e"} />
+        <div className="rounded-xl border border-white/5 bg-white/5 p-3">
+          <div className="text-[11px] text-white/40 mb-2">Competition Level</div>
+          <div className="text-2xl font-bold text-white tabular-nums">
+            {niche.competition}<span className="text-sm font-normal text-white/30">/100</span>
           </div>
-          <div className="mt-1 text-[11px] text-zinc-400">
-            {item.competition < 40 ? "Low — easy to enter ✓" : item.competition < 65 ? "Medium — doable with good content" : "High — needs differentiation"}
+          <div className="mt-2">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+              <div className="h-full rounded-full" style={{
+                width: `${100 - niche.competition}%`,
+                background: niche.competition < 40 ? "#10b981" : niche.competition < 65 ? "#f59e0b" : "#ef4444"
+              }} />
+            </div>
+          </div>
+          <div className="mt-1.5 text-[10px] text-white/40">
+            {niche.competition < 40 ? "🟢 Low — easy to enter" : niche.competition < 65 ? "🟡 Medium — needs good content" : "🔴 High — differentiate well"}
           </div>
         </div>
       </div>
 
+      {/* AI Safety Card */}
+      <div className={`rounded-xl border p-3 ${safeCard.bg} ${safeCard.border}`}>
+        <div className={`text-[13px] font-semibold ${safeCard.text}`}>{safeCard.heading}</div>
+        <div className={`mt-1 text-[12px] leading-relaxed ${safeCard.text} opacity-70`}>{niche.aiSafetyReason}</div>
+      </div>
+
+      {/* Automation Workflow */}
+      <div className="rounded-xl border border-white/5 bg-white/5 p-3">
+        <div className="text-[12px] font-semibold text-white/80 mb-2">🤖 Automation Workflow Guide</div>
+        <ul className="space-y-1.5">
+          {niche.automationTips.map((tip, i) => (
+            <li key={i} className="flex items-start gap-2 text-[12px] text-white/60 leading-relaxed">
+              <span className="shrink-0 text-white/30 mt-0.5">•</span>
+              <span>{tip}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
       {/* Top Keywords */}
-      {item.topKeywords.length > 0 && (
-        <div className="rounded-xl border border-zinc-200 p-3">
-          <div className="text-[12px] font-medium text-zinc-500 mb-2">Top Keywords to Target</div>
+      {niche.topKeywords.length > 0 && (
+        <div className="rounded-xl border border-white/5 bg-white/5 p-3">
+          <div className="text-[12px] font-semibold text-white/80 mb-2">🔑 Top Keywords to Target</div>
           <div className="flex flex-wrap gap-1.5">
-            {item.topKeywords.map((k: string) => (
-              <span key={k} className="rounded-full bg-zinc-100 px-2.5 py-1 text-[12px] font-medium text-zinc-700 ring-1 ring-zinc-200">
+            {niche.topKeywords.map(k => (
+              <span key={k} className="rounded-full border border-white/10 bg-white/8 px-2.5 py-1 text-[11px] font-medium text-white/60">
                 #{k}
+              </span>
+            ))}
+            {niche.tags.map(t => (
+              <span key={`tag-${t}`} className="rounded-full px-2.5 py-1 text-[11px] font-medium border" style={{ background: `${niche.color}15`, color: niche.color, borderColor: `${niche.color}30` }}>
+                {t}
               </span>
             ))}
           </div>
@@ -242,77 +268,122 @@ function NicheDetail({ item }: { item: NicheItem }) {
       )}
 
       {/* Top Video */}
-      {item.topVideo && (
-        <div className="rounded-xl border border-zinc-200 p-3">
-          <div className="text-[12px] font-medium text-zinc-500 mb-2">🏆 Top Performer in Niche</div>
-          <a
-            href={`https://www.youtube.com/watch?v=${item.topVideo.videoId}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="block overflow-hidden rounded-lg bg-zinc-100 mb-2 hover:opacity-90 transition"
-          >
-            <img
-              src={`https://i.ytimg.com/vi/${item.topVideo.videoId}/hqdefault.jpg`}
-              alt={item.topVideo.title}
-              className="w-full aspect-video object-cover"
-            />
+      {niche.topVideo && (
+        <div className="rounded-xl border border-white/5 bg-white/5 p-3">
+          <div className="text-[12px] font-semibold text-white/80 mb-2">🏆 Top Performing Video in Niche</div>
+          <a href={`https://youtube.com/watch?v=${niche.topVideo.videoId}`} target="_blank" rel="noopener noreferrer"
+            className="block overflow-hidden rounded-lg hover:opacity-90 transition mb-2">
+            <img src={`https://i.ytimg.com/vi/${niche.topVideo.videoId}/hqdefault.jpg`} alt={niche.topVideo.title}
+              className="w-full aspect-video object-cover" />
           </a>
-          <div className="text-[13px] font-medium leading-snug line-clamp-2">{item.topVideo.title}</div>
-          <div className="mt-1 text-[11px] text-zinc-500">
-            {item.topVideo.channelTitle} • {fmtNum(item.topVideo.viewCount)} views
-          </div>
+          <div className="text-[12px] font-medium text-white/80 line-clamp-2">{niche.topVideo.title}</div>
+          <div className="mt-1 text-[11px] text-white/40">{niche.topVideo.channelTitle} · {fmtNum(niche.topVideo.viewCount)} views</div>
         </div>
       )}
 
-      {/* Automation playbook */}
-      <div className="rounded-xl border border-zinc-200 p-3">
-        <div className="text-[12px] font-semibold mb-2">🤖 YouTube Automation Workflow</div>
-        <ul className="space-y-1.5">
-          {[
-            item.aiSafety === "safe"
-              ? "✅ Safe for fully AI-generated scripts, voiceover & B-roll"
-              : item.aiSafety === "risky"
-              ? "⚠️ Use human review for scripts — AI errors could trigger flags"
-              : "❌ Avoid fully automated content — very high ban risk",
-            `Target keywords: ${item.topKeywords.slice(0, 3).join(", ")}`,
-            `Publish frequency: ${item.competition < 40 ? "Daily — low comp, volume strategy" : "3x/week — focus on quality"}`,
-            `Estimated RPM: $${item.rpm} — ${item.rpm >= 8 ? "high value niche 💰" : item.rpm >= 5 ? "medium value" : "volume play needed"}`,
-            `Market entry: ${item.smallChannelWins > 2 ? "Small channels winning here — great entry point ✓" : "Dominated by larger channels — niche down further"}`,
-          ].map((tip, i) => (
-            <li key={i} className="flex items-start gap-2 text-[12px] text-zinc-700 leading-relaxed">
-              <span className="mt-0.5 shrink-0 text-zinc-400">•</span>
-              <span>{tip}</span>
-            </li>
-          ))}
-        </ul>
+      <div className="text-[10px] text-white/20 text-right">
+        Live data · Updated {new Date(niche.lastUpdated).toLocaleTimeString()}
+      </div>
+    </div>
+  );
+}
+
+// ─── Channel Explorer Panel ───────────────────────────────────────────────────
+function ChannelExplorer({ niche }: { niche: CuratedNiche }) {
+  const [showAll, setShowAll] = useState(false);
+  const channels = showAll ? niche.channels : niche.channels.slice(0, 5);
+
+  return (
+    <div className="p-4 space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-[14px] font-bold text-white">Channel Explorer</div>
+          <div className="text-[11px] text-white/40">{niche.channels.length} channels found in <span style={{ color: niche.color }}>{niche.name}</span></div>
+        </div>
+        <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold" style={{ background: `${niche.color}20`, color: niche.color, border: `1px solid ${niche.color}30` }}>
+          ${niche.rpm} RPM
+        </span>
       </div>
 
-      <div className="text-[11px] text-zinc-400 text-right">
-        Data from YouTube API • Updated {new Date(item.lastUpdated).toLocaleTimeString()}
+      {/* Legend */}
+      <div className="flex flex-wrap gap-1.5 rounded-xl border border-white/5 bg-white/5 px-3 py-2">
+        {(["mega","large","mid","small","micro"] as ChannelResult["tier"][]).map(t => (
+          <TierBadge key={t} tier={t} />
+        ))}
       </div>
+
+      {/* Channel list */}
+      {niche.channels.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <div className="text-3xl mb-2">📡</div>
+          <div className="text-sm text-white/40">Loading channel data…</div>
+          <div className="text-[11px] text-white/25 mt-1">API fetching channels for this niche</div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {channels.map(ch => (
+            <ChannelCard key={ch.id} ch={ch} />
+          ))}
+        </div>
+      )}
+
+      {/* Load more */}
+      {niche.channels.length > 5 && (
+        <button
+          onClick={() => setShowAll(v => !v)}
+          className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 text-[12px] font-medium text-white/60 hover:bg-white/8 hover:text-white/80 transition"
+        >
+          {showAll ? "Show Less" : `Show All ${niche.channels.length} Channels`}
+        </button>
+      )}
+
+      {/* Search on YouTube CTA */}
+      <a
+        href={`https://youtube.com/results?search_query=${encodeURIComponent(niche.searchQuery)}&sp=CAASAhAC`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center justify-center gap-2 w-full rounded-xl border border-white/10 bg-white/5 py-2.5 text-[12px] font-medium text-white/60 hover:bg-white/8 hover:text-white/80 transition"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M21.6 7.2c-.2-.8-.8-1.4-1.6-1.6C18.2 5 12 5 12 5s-6.2 0-8 .6c-.8.2-1.4.8-1.6 1.6C2 9 2 12 2 12s0 3 .4 4.8c.2.8.8 1.4 1.6 1.6 1.8.6 8 .6 8 .6s6.2 0 8-.6c.8-.2 1.4-.8 1.6-1.6.4-1.8.4-4.8.4-4.8s0-3-.4-4.8zM10 15V9l5 3-5 3z"/></svg>
+        Find More Channels on YouTube
+      </a>
+    </div>
+  );
+}
+
+// ─── Loading Skeleton ─────────────────────────────────────────────────────────
+function LoadingSkeleton() {
+  return (
+    <div className="space-y-2 p-3">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} className="h-16 rounded-xl bg-white/5 animate-pulse" style={{ animationDelay: `${i * 0.1}s` }} />
+      ))}
     </div>
   );
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [niches, setNiches] = useState<NicheItem[]>([]);
+  const [niches, setNiches] = useState<CuratedNiche[]>([]);
   const [loading, setLoading] = useState(true);
   const [market, setMarket] = useState<"US" | "UK" | "Both">("Both");
-  const [sort, setSort] = useState<SortKey>("opportunity");
-  const [safeOnly, setSafeOnly] = useState(false);
-  const [selected, setSelected] = useState<NicheItem | null>(null);
+  const [selected, setSelected] = useState<CuratedNiche | null>(null);
   const [live, setLive] = useState(true);
   const [lastFetch, setLastFetch] = useState<Date | null>(null);
   const timer = useRef<number | null>(null);
 
-  const fetchData = async (mkt = market) => {
+  const fetchData = async (mkt: "US" | "UK" | "Both" = market) => {
     setLoading(true);
     try {
-      const result = await buildNiches(mkt);
+      const result = await buildCuratedNiches(mkt);
       setNiches(result);
       setLastFetch(new Date());
-      if (result[0]) setSelected(result[0]);
+      if (!selected && result[0]) setSelected(result[0]);
+      else if (selected) {
+        const updated = result.find(n => n.id === selected.id);
+        if (updated) setSelected(updated);
+      }
     } catch (e) {
       console.error("Niche fetch failed", e);
     } finally {
@@ -328,260 +399,150 @@ export default function App() {
     return () => { if (timer.current) clearInterval(timer.current); };
   }, [live, market]);
 
-  const filtered = useMemo(() => {
-    let arr = [...niches];
-    if (market !== "Both") arr = arr.filter(n => n.market === market || n.market === "Both");
-    if (safeOnly) arr = arr.filter(n => n.aiSafety === "safe");
-    switch (sort) {
-      case "vph":       return arr.sort((a, b) => b.vph - a.vph);
-      case "rpm":       return arr.sort((a, b) => b.rpm - a.rpm);
-      case "marketcap": return arr.sort((a, b) => b.marketCap - a.marketCap);
-      case "lowcomp":   return arr.sort((a, b) => a.competition - b.competition);
-      default:          return arr.sort((a, b) => b.opportunityScore - a.opportunityScore);
-    }
-  }, [niches, market, safeOnly, sort]);
-
-  const maxVph = Math.max(...filtered.map(n => n.vph), 1);
+  const usNiches = niches.filter(n => n.market === "US");
+  const ukNiches = niches.filter(n => n.market === "UK");
+  const displayNiches = market === "US" ? usNiches : market === "UK" ? ukNiches : niches;
 
   const safeCount = niches.filter(n => n.aiSafety === "safe").length;
-  const avgRpm = niches.length ? (niches.reduce((s, n) => s + n.rpm, 0) / niches.length).toFixed(1) : "0";
-  const totalVph = niches.reduce((s, n) => s + n.vph, 0);
+  const topRpm = niches.length ? Math.max(...niches.map(n => n.rpm)) : 0;
 
   return (
-    <div className="min-h-screen bg-[#f7f7f8] text-zinc-900" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
-      {/* ── Header ── */}
-      <header className="sticky top-0 z-40 border-b border-zinc-200 bg-white/90 backdrop-blur-md">
-        <div className="mx-auto flex max-w-[1400px] items-center gap-3 px-5 py-3.5">
-          {/* Logo */}
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-900 text-white shadow-sm text-lg">
-              🎯
-            </div>
-            <div>
-              <div className="text-[15px] font-bold leading-5 tracking-tight">Niche Intelligence</div>
-              <div className="text-[11px] text-zinc-400 -mt-0.5">YouTube Automation Finder</div>
-            </div>
-          </div>
+    <div className="flex h-screen flex-col overflow-hidden" style={{ background: "#0c0c0e", fontFamily: "'Inter', system-ui, sans-serif", color: "white" }}>
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
-          {/* Stats pills */}
-          <div className="ml-4 hidden items-center gap-2 md:flex">
-            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-emerald-200">
-              ✅ {safeCount} AI-Safe Niches
-            </span>
-            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 ring-1 ring-blue-200">
-              Avg RPM ${avgRpm}
-            </span>
-            <span className="rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700 ring-1 ring-violet-200">
-              {fmtNum(totalVph)} total VPH
-            </span>
+      {/* ── Top Bar ── */}
+      <header className="shrink-0 flex items-center gap-4 border-b px-5 py-3" style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+        {/* Logo */}
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl text-xl" style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)", boxShadow: "0 0 20px #6366f140" }}>
+            🎯
           </div>
+          <div>
+            <div className="text-[15px] font-bold tracking-tight">Niche Intelligence</div>
+            <div className="text-[10px] text-white/30 -mt-0.5">YouTube Automation Dashboard</div>
+          </div>
+        </div>
 
-          <div className="ml-auto flex items-center gap-2">
-            {lastFetch && (
-              <span className="hidden text-[11px] text-zinc-400 sm:block">
-                Updated {lastFetch.toLocaleTimeString()}
-              </span>
-            )}
-            <button
-              onClick={() => setLive(v => !v)}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition ${
-                live ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-zinc-300 bg-white text-zinc-600"
-              }`}
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${live ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"}`} />
-              {live ? "Live" : "Paused"}
+        {/* Market tabs */}
+        <div className="flex items-center gap-1 rounded-xl p-1" style={{ background: "rgba(255,255,255,0.05)" }}>
+          {(["Both", "US", "UK"] as const).map(m => (
+            <button key={m} onClick={() => { setMarket(m); fetchData(m); }}
+              className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition ${market === m ? "bg-white/10 text-white shadow-sm" : "text-white/40 hover:text-white/70"}`}>
+              {m === "Both" ? "🌍 All Niches" : m === "US" ? "🇺🇸 US Only" : "🇬🇧 UK Only"}
             </button>
-            <button
-              onClick={() => fetchData(market)}
-              disabled={loading}
-              className="rounded-full border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 transition"
-            >
-              {loading ? "Loading…" : "↻ Refresh"}
-            </button>
-          </div>
+          ))}
+        </div>
+
+        {/* Stats */}
+        <div className="hidden items-center gap-2 md:flex ml-2">
+          <span className="rounded-full border px-2.5 py-1 text-[11px] font-semibold" style={{ background: "rgba(16,185,129,0.1)", color: "#10b981", borderColor: "rgba(16,185,129,0.2)" }}>
+            ✅ {safeCount} AI-Safe
+          </span>
+          <span className="rounded-full border px-2.5 py-1 text-[11px] font-semibold" style={{ background: "rgba(99,102,241,0.1)", color: "#818cf8", borderColor: "rgba(99,102,241,0.2)" }}>
+            {displayNiches.length} Niches
+          </span>
+          <span className="rounded-full border px-2.5 py-1 text-[11px] font-semibold" style={{ background: "rgba(245,158,11,0.1)", color: "#fbbf24", borderColor: "rgba(245,158,11,0.2)" }}>
+            Top RPM ${topRpm}
+          </span>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          {lastFetch && <span className="hidden text-[10px] text-white/25 sm:block">Updated {lastFetch.toLocaleTimeString()}</span>}
+          <button onClick={() => setLive(v => !v)}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${live ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" : "border-white/10 bg-white/5 text-white/40"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${live ? "bg-emerald-400 animate-pulse" : "bg-white/30"}`} />
+            {live ? "Live" : "Paused"}
+          </button>
+          <button onClick={() => fetchData(market)} disabled={loading}
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-white/50 hover:bg-white/8 hover:text-white/70 disabled:opacity-40 transition">
+            {loading ? "…" : "↻ Refresh"}
+          </button>
         </div>
       </header>
 
-      {/* ── Filter Bar ── */}
-      <div className="border-b border-zinc-200 bg-white">
-        <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-3 px-5 py-3">
-          {/* Market toggle */}
-          <div className="flex items-center gap-1 rounded-xl bg-zinc-100 p-1">
-            {(["Both", "US", "UK"] as const).map(m => (
-              <button
-                key={m}
-                onClick={() => { setMarket(m); fetchData(m); }}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
-                  market === m ? "bg-white shadow-sm ring-1 ring-zinc-200 text-zinc-900" : "text-zinc-500 hover:text-zinc-900"
-                }`}
-              >
-                {m === "Both" ? "🌍 Both" : m === "US" ? "🇺🇸 US" : "🇬🇧 UK"}
-              </button>
-            ))}
+      {/* ── 3-Column Body ── */}
+      <div className="flex flex-1 overflow-hidden">
+
+        {/* ── LEFT: Niche Sidebar ── */}
+        <aside className="w-72 shrink-0 flex flex-col border-r overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.01)" }}>
+          <div className="shrink-0 px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+            <div className="text-[12px] font-bold text-white/50 uppercase tracking-wider">Curated Niches</div>
           </div>
 
-          <div className="h-6 w-px bg-zinc-200 hidden sm:block" />
-
-          {/* Sort */}
-          <div className="flex items-center gap-1 rounded-xl bg-zinc-100 p-1">
-            {([
-              { k: "opportunity", l: "Opportunity" },
-              { k: "vph",        l: "VPH" },
-              { k: "rpm",        l: "RPM" },
-              { k: "marketcap",  l: "Market Cap" },
-              { k: "lowcomp",    l: "Low Comp" },
-            ] as { k: SortKey; l: string }[]).map(s => (
-              <button
-                key={s.k}
-                onClick={() => setSort(s.k)}
-                className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition ${
-                  sort === s.k ? "bg-white shadow-sm ring-1 ring-zinc-200 text-zinc-900" : "text-zinc-500 hover:text-zinc-900"
-                }`}
-              >
-                {s.l}
-              </button>
-            ))}
-          </div>
-
-          <div className="h-6 w-px bg-zinc-200 hidden sm:block" />
-
-          {/* AI Safe toggle */}
-          <button
-            onClick={() => setSafeOnly(v => !v)}
-            className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-[12px] font-medium transition ${
-              safeOnly
-                ? "border-emerald-300 bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
-                : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
-            }`}
-          >
-            <span className={`h-4 w-7 rounded-full transition-colors relative ${safeOnly ? "bg-emerald-400" : "bg-zinc-200"}`}>
-              <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${safeOnly ? "translate-x-3.5" : "translate-x-0.5"}`} />
-            </span>
-            AI Safe Only
-          </button>
-        </div>
-      </div>
-
-      {/* ── Main Content ── */}
-      <main className="mx-auto grid max-w-[1400px] grid-cols-12 gap-0 px-5 py-5">
-        {/* ── Niche List ── */}
-        <section className="col-span-12 xl:col-span-5">
-          <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
-            {/* Table header */}
-            <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3">
-              <div className="flex items-center gap-2">
-                <span className="text-[14px] font-bold">Niches</span>
-                <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-semibold text-zinc-600">
-                  {filtered.length}
-                </span>
-              </div>
-              <div className="hidden items-center gap-4 text-[11px] text-zinc-400 md:flex">
-                <span className="w-[80px] text-right">VPH</span>
-                <span className="w-[60px] text-right">RPM</span>
-                <span className="w-[90px] text-right hidden lg:block">Mkt Cap</span>
-                <span className="w-[80px] text-right hidden xl:block">Competition</span>
-                <span className="w-[60px] text-right">Score</span>
-              </div>
-            </div>
-
-            {/* Rows */}
-            <div className="max-h-[calc(100vh-260px)] divide-y divide-zinc-50 overflow-auto">
-              {loading && niches.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 gap-3">
-                  <div className="h-7 w-7 animate-spin rounded-full border-2 border-zinc-200 border-t-zinc-800" />
-                  <div className="text-sm text-zinc-400">Fetching live YouTube niche data…</div>
-                </div>
-              ) : filtered.length === 0 ? (
-                <div className="py-12 text-center text-sm text-zinc-400">
-                  No niches match filters. Try removing "AI Safe Only".
-                </div>
-              ) : filtered.map(item => (
-                <NicheRow
-                  key={item.id}
-                  item={item}
-                  active={selected?.id === item.id}
-                  maxVph={maxVph}
-                  onClick={() => setSelected(item)}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* Overview cards */}
-          <div className="mt-4 grid grid-cols-3 gap-3">
-            {[
-              {
-                label: "Highest RPM",
-                value: niches.length ? `$${Math.max(...niches.map(n => n.rpm))}` : "—",
-                sub: niches.length ? niches.find(n => n.rpm === Math.max(...niches.map(n => n.rpm)))?.niche : "",
-                color: "#10b981",
-              },
-              {
-                label: "Fastest Growing",
-                value: niches.length ? fmtNum(Math.max(...niches.map(n => n.vph))) : "—",
-                sub: "views/hr",
-                color: "#3b82f6",
-              },
-              {
-                label: "Easiest Entry",
-                value: niches.length ? `${Math.min(...niches.map(n => n.competition))}/100` : "—",
-                sub: niches.length ? niches.find(n => n.competition === Math.min(...niches.map(n => n.competition)))?.niche : "",
-                color: "#8b5cf6",
-              },
-            ].map(c => (
-              <div key={c.label} className="rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm">
-                <div className="text-[11px] text-zinc-400">{c.label}</div>
-                <div className="mt-0.5 text-[18px] font-bold tabular-nums" style={{ color: c.color }}>{c.value}</div>
-                <div className="text-[11px] text-zinc-500 capitalize">{c.sub}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* ── Detail Panel ── */}
-        <aside className="col-span-12 mt-4 xl:col-span-7 xl:mt-0 xl:pl-4">
-          <div className="sticky top-[120px]">
-            <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-zinc-100 px-5 py-3">
-                <div>
-                  <div className="text-[14px] font-bold">Niche Intelligence</div>
-                  <div className="text-[11px] text-zinc-400">Select a niche to see full analysis + AI automation guide</div>
-                </div>
-                {selected && (
-                  <span
-                    className="rounded-full px-2.5 py-1 text-[11px] font-semibold"
-                    style={{
-                      background: `${NICHE_COLOR[selected.niche]}18`,
-                      color: NICHE_COLOR[selected.niche],
-                      border: `1px solid ${NICHE_COLOR[selected.niche]}40`,
-                    }}
-                  >
-                    {selected.niche}
-                  </span>
+          <div className="flex-1 overflow-auto py-2 px-2 space-y-0.5">
+            {loading && niches.length === 0 ? (
+              <LoadingSkeleton />
+            ) : (
+              <>
+                {/* US Section */}
+                {(market === "Both" || market === "US") && usNiches.length > 0 && (
+                  <>
+                    <div className="px-3 pt-3 pb-1.5 text-[10px] font-bold uppercase tracking-widest text-white/25 flex items-center gap-2">
+                      <span>🇺🇸</span> United States
+                    </div>
+                    {usNiches.map(n => (
+                      <NicheSidebarRow key={n.id} niche={n} active={selected?.id === n.id} onClick={() => setSelected(n)} />
+                    ))}
+                  </>
                 )}
-              </div>
-              <div className="max-h-[calc(100vh-200px)] overflow-auto">
-                {selected ? (
-                  <NicheDetail item={selected} />
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-20 text-zinc-400">
-                    <div className="text-4xl mb-3">🎯</div>
-                    <div className="text-sm">Select a niche from the list to see analysis</div>
-                  </div>
+
+                {/* UK Section */}
+                {(market === "Both" || market === "UK") && ukNiches.length > 0 && (
+                  <>
+                    <div className="px-3 pt-4 pb-1.5 text-[10px] font-bold uppercase tracking-widest text-white/25 flex items-center gap-2">
+                      <span>🇬🇧</span> United Kingdom
+                    </div>
+                    {ukNiches.map(n => (
+                      <NicheSidebarRow key={n.id} niche={n} active={selected?.id === n.id} onClick={() => setSelected(n)} />
+                    ))}
+                  </>
                 )}
-              </div>
+              </>
+            )}
+          </div>
+
+          {/* Sidebar footer */}
+          <div className="shrink-0 border-t px-4 py-3" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+            <div className="text-[10px] text-white/20">
+              {niches.length} curated niches · Live YouTube data · 5 min refresh
             </div>
           </div>
         </aside>
-      </main>
 
-      {/* ── Footer ── */}
-      <footer className="border-t border-zinc-200 bg-white/70 mt-4">
-        <div className="mx-auto flex max-w-[1400px] items-center justify-between px-5 py-3 text-[11px] text-zinc-400">
-          <div>✅ Live YouTube Data API v3 • Niche aggregation • RPM estimates based on industry benchmarks</div>
-          <div>Auto-refresh every 5 min</div>
-        </div>
-      </footer>
+        {/* ── CENTER: Niche Intelligence ── */}
+        <main className="flex-1 overflow-auto border-r" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          {selected ? (
+            <NicheIntelPanel niche={selected} key={selected.id} />
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center text-center px-8">
+              <div className="text-5xl mb-4">🎯</div>
+              <div className="text-[16px] font-semibold text-white/60">Select a niche to see intelligence</div>
+              <div className="mt-2 text-[13px] text-white/30 max-w-xs">
+                Choose any niche from the sidebar to see RPM, VPH, market cap, AI safety guide, and automation workflow
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* ── RIGHT: Channel Explorer ── */}
+        <aside className="w-80 shrink-0 flex flex-col overflow-hidden" style={{ background: "rgba(255,255,255,0.01)" }}>
+          <div className="shrink-0 px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+            <div className="text-[12px] font-bold text-white/50 uppercase tracking-wider">Channel Explorer</div>
+          </div>
+          <div className="flex-1 overflow-auto">
+            {selected ? (
+              <ChannelExplorer niche={selected} key={selected.id} />
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center text-center px-6">
+                <div className="text-4xl mb-3">📺</div>
+                <div className="text-[13px] text-white/30">Select a niche to explore channels</div>
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }
